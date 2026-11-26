@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: test_redis.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_redis.py",
+            "console": "integratedTerminal",
+            "python": "/Users/yf12/anaconda3/envs/EduRAG/bin/python",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}
