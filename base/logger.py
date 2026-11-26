@@ -20,13 +20,15 @@
 import os.path
 import logging
 
+from base.config import config
 
-def setup_logger(logger_name, logger_file='logs/app.log'):
+
+def setup_logger(logger_name, logger_file=None):
+    logger_file = logger_file or config.LOG_FILE
     # 1. 确保日志目录存在，不存在创建
     # logger_file 是日志的文件名，所以我们先取到它所在的目录 os.path.pathj
-    dirname = os.path.dirname(logger_file)
-    if not os.path.exists(dirname):
-        os.makedirs(dirname)
+    dirname = os.path.dirname(os.path.abspath(logger_file))
+    os.makedirs(dirname, exist_ok=True)
     # 2. 创建日志记录器: Logger
     # 2.1 获取Logger对象
     logger = logging.getLogger(logger_name)
@@ -60,5 +62,3 @@ def setup_logger(logger_name, logger_file='logs/app.log'):
 
 
 logger = setup_logger('EduRAG')
-print("当前工作目录：", os.getcwd())
-print("logger.py 所在目录：", os.path.dirname(os.path.abspath(__file__)))
