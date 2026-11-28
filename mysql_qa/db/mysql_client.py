@@ -42,7 +42,9 @@ class MysqlClient:
                 , password=config.MYSQL_PASSWORD
                 , db=config.MYSQL_DATABASE
                 , port=config.MYSQL_PORT
+                , charset='utf8mb4'
             )
+            self.connection = self.connect
             # mysql游标
             self.cursor = self.connect.cursor()
             logger.info("mysql初始化成功")
@@ -83,11 +85,12 @@ class MysqlClient:
                 self.cursor.execute(sql, (question, answer, subject))
             # 把这几百条数据的提交作为一次事务，要么全部成功，要不全部失败
             self.connect.commit()
-            logger.info("输入导入成功，共：{}条".format(data_frame.count()))
+            logger.info("数据导入成功，共 %s 条", len(data_frame))
         except Exception as e:
             # 事务回滚
             self.connect.rollback()
             logger.error("数据导入失败: {}".format(e))
+            raise
 
     # 4. 读取所有的问题
     def fetch_questions(self):
@@ -133,6 +136,10 @@ class MysqlClient:
         except MySQLError as e:
             # 记录关闭失败
             logger.error(f"关闭连接失败: {e}")
+
+
+# 随堂代码使用 MySQLClient，保留旧名称以兼容当前项目已有引用。
+MySQLClient = MysqlClient
 
 
 

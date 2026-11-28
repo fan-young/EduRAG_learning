@@ -1,19 +1,15 @@
-# 该脚本用于: 文本预处理.
+"""中文问题文本预处理。"""
 
-# utils/preprocess.py
-# 导入分词库
 import jieba
-# 导入日志
+
 from base.logger import logger
 
+
 def preprocess_text(text):
-    # 预处理文本
-    logger.info("开始预处理文本")
-    try:
-        # 分词并转换为小写
-        return jieba.lcut(text.lower())
-    except AttributeError as e:
-        # 记录预处理失败
-        logger.error(f"文本预处理失败: {e}")
-        # 返回空列表
+    """将非空文本转为适合 BM25 的小写词元列表。"""
+    if not isinstance(text, str) or not text.strip():
+        logger.warning("文本预处理失败: 输入必须是非空字符串")
         return []
+
+    words = jieba.lcut(text.lower().strip())
+    return [word.strip() for word in words if word.strip()]

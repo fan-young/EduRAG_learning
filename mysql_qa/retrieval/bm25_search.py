@@ -1,63 +1,129 @@
-"""
-需求：封装一个BM25搜索工具，用于从文档集合中搜索与用户问题最相似的文档。
-思路：
-1. 接收文档集合和匹配阈值
-2. 对文档集合进行分词
-3. 根据分词结果创建BM25模型
-4. 对用户查询进行分词
-5. 计算查询与每个文档的BM25得分
-6. 获取得分最高的文档
-7. 得分达到阈值时返回文档和得分，否则返回None和得分
+"""使用 BM25 在高频 FAQ 中检索答案。"""
 
-"""
-import jieba
-from rank_bm25 import BM25L
+import numpy as np
+from rank_bm25 import BM25Okapi
+
+from base.logger import logger
+from mysql_qa.utils.preprocess import preprocess_text
 
 
 class BM25Search:
-    def __init__(self, documents, threshold=0.85):
-        # 1. 接收文档集合和匹配阈值
-        if not documents:
-            raise ValueError("documents不能为空")
-        if threshold < 0:
-            raise ValueError("threshold不能小于0")
+    """整合 Redis、MySQL 与 BM25 的 FAQ 检索器。"""
 
-        self.documents = documents
-        self.threshold = threshold
+    ORIGINAL_QUESTIONS_KEY = "qa_original_questions"
+    TOKENIZED_QUESTIONS_KEY = "qa_tokenized_questions"
 
-        # 2. 对文档集合进行分词
-        tokenized_documents = []
-        for document in self.documents:
-            if not isinstance(document, str) or not document.strip():
-                raise ValueError("documents中的每个文档都必须是非空字符串")
-            tokenized_documents.append(self._tokenize(document))
-
-        # 3. 根据分词结果创建BM25模型
-        # BM25L在小型文档集上不容易出现负分，更适合当前的问答场景
-        self.bm25 = BM25L(tokenized_documents)
+    def __init__(self, redis_client, mysql_client):
+        self.redis_client = redis_client
+        self.mysql_client = mysql_client
+        self.original_questions = []
+        self.questions = []
+        self.bm25 = None
+        self._load_data()
 
     @staticmethod
-    def _tokenize(text):
-        # 转成小写后分词，并过滤空白内容
-        words = jieba.lcut(text.lower())
-        return [word.strip() for word in words if word.strip()]
+    def _normalize_questions(rows):
+        """兼容数据库返回的 ``[(question,)]`` 和 ``[question]``。"""
+        normalized = []
+        for row in rows or []:
+            question = row[0] if isinstance(row, (tuple, list)) else row
+            if isinstance(question, str) and question.strip():
+                normalized.append(question.strip())
+        return normalized
 
-    def search(self, query):
-        # 4. 对用户查询进行分词
+    def _load_data(self):
+        original_questions = self.redis_client.get_data(
+            self.ORIGINAL_QUESTIONS_KEY
+        )
+        tokenized_questions = self.redis_client.get_data(
+            self.TOKENIZED_QUESTIONS_KEY
+        )
+
+        if original_questions and tokenized_questions:
+            self.original_questions = self._normalize_questions(original_questions)
+            self.questions = tokenized_questions
+
+        if (
+            not self.original_questions
+            or not self.questions
+            or len(self.original_questions) != len(self.questions)
+        ):
+            self.original_questions = self._normalize_questions(
+                self.mysql_client.fetch_questions()
+            )
+            if not self.original_questions:
+                logger.warning("MySQL中没有可用于BM25检索的问题")
+                self.questions = []
+                return
+
+            self.questions = [
+                preprocess_text(question) for question in self.original_questions
+            ]
+            self.redis_client.set_data(
+                self.ORIGINAL_QUESTIONS_KEY, self.original_questions
+            )
+            self.redis_client.set_data(
+                self.TOKENIZED_QUESTIONS_KEY, self.questions
+            )
+
+        self.bm25 = BM25Okapi(self.questions)
+        logger.info("BM25模型初始化成功，共加载 %s 个问题", len(self.questions))
+
+    @staticmethod
+    def _softmax(scores):
+        scores = np.asarray(scores, dtype=float)
+        if scores.size == 0:
+            return scores
+        exp_scores = np.exp(scores - np.max(scores))
+        total = exp_scores.sum()
+        return exp_scores / total if total else np.zeros_like(exp_scores)
+
+    def search(self, query, threshold=0.85):
+        """返回 ``(answer, needs_rag)``。
+
+        ``needs_rag`` 为 ``True`` 表示 FAQ 未可靠命中，应交给后续 RAG。
+        """
         if not isinstance(query, str) or not query.strip():
-            raise ValueError("query必须是非空字符串")
-        tokenized_query = self._tokenize(query)
+            logger.warning("无效查询: 查询必须是非空字符串")
+            return None, True
 
-        # 5. 计算查询与每个文档的BM25得分
-        scores = self.bm25.get_scores(tokenized_query)
+        query = query.strip()
+        cached_answer = self.redis_client.get_answer(query)
+        if cached_answer is not None:
+            return cached_answer, False
 
-        # 6. 获取得分最高的文档
-        best_index = max(range(len(scores)), key=lambda index: scores[index])
-        best_document = self.documents[best_index]
-        best_score = float(scores[best_index])
+        if self.bm25 is None:
+            logger.warning("BM25模型尚未加载，查询转交RAG")
+            return None, True
 
-        # 7. 得分达到阈值时返回文档和得分
-        if best_score >= self.threshold:
-            return best_document, best_score
+        query_tokens = preprocess_text(query)
+        if not query_tokens:
+            return None, True
 
-        return None, best_score
+        try:
+            scores = self.bm25.get_scores(query_tokens)
+            normalized_scores = self._softmax(scores)
+            best_index = int(np.argmax(normalized_scores))
+            best_score = float(normalized_scores[best_index])
+
+            if best_score >= threshold:
+                matched_question = self.original_questions[best_index]
+                answer = self.mysql_client.fetch_answer(matched_question)
+                if answer:
+                    self.redis_client.set_answer(query, answer)
+                    logger.info(
+                        "FAQ搜索成功，匹配问题: %s，相似度: %.3f",
+                        matched_question,
+                        best_score,
+                    )
+                    return answer, False
+
+            logger.info(
+                "FAQ未找到可靠答案，最高匹配度: %.3f，阈值: %.3f",
+                best_score,
+                threshold,
+            )
+            return None, True
+        except Exception as exc:
+            logger.exception("FAQ检索异常: %s", exc)
+            return None, True
